@@ -1,0 +1,42 @@
+# Front controller for Apache. Point your domain's document root at this public/
+# folder. Real files (the stylesheet, favicon) are served directly; everything else
+# is routed to index.php, which does the app's own routing.
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Serve existing files and directories as-is (e.g. /assets/app.css).
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Everything else goes through the front controller.
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+# ----------------------------------------------------------------- security
+# Force HTTPS when a proxy tells us the original request was already secure is
+# handled in PHP; this block upgrades plain HTTP hits at the web-server level.
+<IfModule mod_rewrite.c>
+    RewriteCond %{HTTPS} !=on
+    RewriteCond %{HTTP:X-Forwarded-Proto} !=https
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# Never serve dotfiles (e.g. a stray .env, .git).
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# A couple of sensible cache headers for static assets.
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 7 days"
+    ExpiresByType image/svg+xml "access plus 7 days"
+</IfModule>

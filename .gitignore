@@ -1,0 +1,15 @@
+# Deployment secrets — never commit.
+config.local.php
+
+# Runtime data — created on the server, never shipped.
+data/bookings.sqlite
+data/bookings.sqlite-journal
+data/bookings.sqlite-wal
+data/bookings.sqlite-shm
+data/sessions/
+data/php-error.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
