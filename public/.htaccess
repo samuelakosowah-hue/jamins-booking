@@ -1,26 +1,19 @@
-# Front controller for Apache. Point your domain's document root at this public/
-# folder. Real files (the stylesheet, favicon) are served directly; everything else
-# is routed to index.php, which does the app's own routing.
+# Front controller for Apache. The web root points at THIS public/ folder; the rest
+# of the app sits one level up, out of reach. Real files (the stylesheet, favicon)
+# are served directly; everything else is routed to index.php.
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # Serve existing files and directories as-is (e.g. /assets/app.css).
-    RewriteCond %{REQUEST_FILENAME} -f [OR]
-    RewriteCond %{REQUEST_FILENAME} -d
-    RewriteRule ^ - [L]
-
-    # Everything else goes through the front controller.
-    RewriteRule ^ index.php [L]
-</IfModule>
-
-# ----------------------------------------------------------------- security
-# Force HTTPS when a proxy tells us the original request was already secure is
-# handled in PHP; this block upgrades plain HTTP hits at the web-server level.
-<IfModule mod_rewrite.c>
+    # Send plain HTTP to HTTPS (skip if already secure, directly or via a proxy).
     RewriteCond %{HTTPS} !=on
     RewriteCond %{HTTP:X-Forwarded-Proto} !=https
     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+    # Anything that isn't a real file or directory goes through index.php.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L]
 </IfModule>
 
 <IfModule mod_headers.c>
@@ -29,12 +22,11 @@
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
 </IfModule>
 
-# Never serve dotfiles (e.g. a stray .env, .git).
+# Never serve dotfiles (e.g. a stray .env).
 <FilesMatch "^\.">
     Require all denied
 </FilesMatch>
 
-# A couple of sensible cache headers for static assets.
 <IfModule mod_expires.c>
     ExpiresActive On
     ExpiresByType text/css "access plus 7 days"

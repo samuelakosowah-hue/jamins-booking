@@ -51,13 +51,24 @@ project root** — everything else (the database, your SMS key, the code) sits a
 - **VPS (Apache/Nginx):** set the virtual host root to `.../event-booking/public`.
   For Nginx, copy [`deploy/nginx.conf.example`](deploy/nginx.conf.example) and adjust.
 
-**If your host won't let you change the document root**, upload the folder so that the
-project root is the web root instead. The included top-level `.htaccess` will then hide
-the internals and forward requests into `public/` automatically. This works, but
-pointing at `public/` directly is cleaner and safer — prefer it if you can.
+The `public/.htaccess` needed for Apache is already included. Nginx ignores it; use
+the sample config in `deploy/` instead.
 
-The `.htaccess` files needed for Apache are already included. Nginx ignores them; use
-the sample config instead.
+**If your host truly won't let you point the document root at `public/`**, and you must
+serve the project root itself, create a `.htaccess` in the project root with the contents
+below. Do this ONLY in that situation — if the document root is already `public/`, an
+`.htaccess` in the project root will be read as a parent directory and cause a 403.
+
+```apache
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(config\.php|config\.local\.php|config\.local\.example\.php) - [F,L]
+    RewriteRule ^(src|views|data)/ - [F,L]
+    RewriteCond %{DOCUMENT_ROOT}/public%{REQUEST_URI} -f
+    RewriteRule ^(.*)$ public/$1 [L]
+    RewriteRule ^ public/index.php [L]
+</IfModule>
+```
 
 ---
 
@@ -119,7 +130,7 @@ Open the site. On the first request the app creates `data/bookings.sqlite`, seed
 
 ## Going-live checklist
 
-- [ ] Document root points at `public/` (or the fallback `.htaccess` is in place).
+- [ ] Document root points at `public/`.
 - [ ] HTTPS works and HTTP redirects to it.
 - [ ] `config.local.php` has a **strong** admin password (not `jamins2026`).
 - [ ] `data/` is writable — a test booking saves and appears in `/admin`.
@@ -151,5 +162,6 @@ Open the site. On the first request the app creates `data/bookings.sqlite`, seed
 | Blank page / 500 error | `data/` not writable, or PHP older than 8.1. Check `data/php-error.log`. |
 | "Session expired" on every booking | `data/sessions/` not writable. |
 | Browser downloads the code instead of running it | PHP not enabled for the folder, or wrong document root. |
-| You can see `config.php` / the database in a browser | Document root is the project root without the fallback `.htaccess`. Point it at `public/`. |
+| You can see `config.php` / the database in a browser | Document root is the project root, not `public/`. Point it at `public/`. |
+| 403 Forbidden on every page | A stray `.htaccess` in the project root (above `public/`) is being read as a parent directory. Delete it — with docroot at `public/` you only need `public/.htaccess`. |
 | SMS never arrives | Driver still `log`, wrong API key, or no mNotify credits — check `/admin/messages`, each row shows the gateway's response. |
