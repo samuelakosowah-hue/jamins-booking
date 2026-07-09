@@ -14,7 +14,7 @@ declare(strict_types=1);
 
 /**
  * Normalise a Ghanaian number to the digits-only international form mNotify wants,
- * e.g. "024 960 1468" and "+233249601468" both become "233249601468".
+ * e.g. "024 123 4567" and "+233241234567" both become "233241234567".
  *
  * @return string|null null when it cannot possibly be a phone number.
  */
