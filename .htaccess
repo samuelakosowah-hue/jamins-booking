@@ -1,0 +1,10 @@
+# The app root may live inside public_html (when the host only allows document roots
+# there). In that case this folder is reachable through the MAIN domain, so make sure
+# the files holding secrets can never be fetched over the web.
+#
+# There are NO rewrites here on purpose: this file is also read as a parent of the
+# public/ document root, and a rewrite would loop and 403 the subdomain. Deny rules
+# match by filename only, so they never touch the app's public/ files.
+<FilesMatch "^config.*\.php$">
+    Require all denied
+</FilesMatch>
