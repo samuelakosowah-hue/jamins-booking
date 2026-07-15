@@ -2,6 +2,14 @@
 # of the app sits one level up, out of reach. Real files (the stylesheet, favicon)
 # are served directly; everything else is routed to index.php.
 
+# This is a PHP app, NOT the account's Node/Passenger app. If the account runs a
+# Passenger (Node/Python/Ruby) site, Passenger is inherited into every folder and
+# would hijack the bare "/" request here — serving the wrong site. Turn it off so
+# every request, including the homepage, goes to our PHP front controller.
+<IfModule mod_passenger.c>
+    PassengerEnabled off
+</IfModule>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
