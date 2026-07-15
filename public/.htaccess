@@ -2,10 +2,9 @@
 # of the app sits one level up, out of reach. Real files (the stylesheet, favicon)
 # are served directly; everything else is routed to index.php.
 
-# This is a PHP app, NOT the account's Node/Passenger app. If the account runs a
-# Passenger (Node/Python/Ruby) site, Passenger is inherited into every folder and
-# would hijack the bare "/" request here — serving the wrong site. Turn it off so
-# every request, including the homepage, goes to our PHP front controller.
+# This is a PHP app, NOT the account's Node/Passenger app. Try to disable Passenger
+# outright (works on most hosts); the root rewrite below is the belt-and-braces
+# fallback for hosts that ignore this directive in .htaccess.
 <IfModule mod_passenger.c>
     PassengerEnabled off
 </IfModule>
@@ -18,7 +17,12 @@
     RewriteCond %{HTTP:X-Forwarded-Proto} !=https
     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
 
-    # Anything that isn't a real file or directory goes through index.php.
+    # The account runs a Passenger (Node) app that otherwise claims the bare "/".
+    # Passenger passes through requests that resolve to a real file, so rewriting the
+    # root to the real index.php hands the homepage to PHP just like every other route.
+    RewriteRule ^$ index.php [L]
+
+    # Anything else that isn't a real file or directory also goes through index.php.
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteRule ^ index.php [L]
