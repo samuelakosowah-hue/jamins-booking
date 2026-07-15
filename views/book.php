@@ -5,7 +5,10 @@ $val = fn(string $k): string => e((string) ($old[$k] ?? ''));
 $checked = fn(string $k): bool => in_array($k, (array) ($old['services'] ?? []), true);
 $bad = fn(string $k): string => isset($errors[$k]) ? ' field--bad' : '';
 
-$chosenDate = (string) ($old['appointment_date'] ?? first_bookable_date());
+$chosenDate = (string) ($old['appointment_date'] ?? first_bookable_date($config));
+if ($chosenDate === '' || !is_bookable_date($chosenDate, $config)) {
+    $chosenDate = first_bookable_date($config);
+}
 ?>
 
 <div class="page">
@@ -121,8 +124,12 @@ $chosenDate = (string) ($old['appointment_date'] ?? first_bookable_date());
         <label for="appointment_date">Preferred date</label>
         <input id="appointment_date" name="appointment_date" type="date"
                value="<?= e($chosenDate) ?>"
-               min="<?= e(first_bookable_date()) ?>" max="<?= e(last_bookable_date($config)) ?>" required>
+               min="<?= e(first_bookable_date($config)) ?>" max="<?= e(last_bookable_date($config)) ?>"
+               data-closed-weekdays="<?= e(implode(',', array_map('strval', $config['closed_weekdays'] ?? []))) ?>"
+               data-closed-dates="<?= e(implode(',', $config['closed_dates'] ?? [])) ?>"
+               required>
         <?php if (isset($errors['appointment_date'])): ?><p class="field__error"><?= e($errors['appointment_date']) ?></p><?php endif ?>
+        <p class="field__hint">Sundays and listed closed days are not bookable.</p>
       </div>
 
       <div class="slots<?= $bad('slot_id') ?>" id="slots" style="margin-top:20px">
@@ -187,10 +194,33 @@ $chosenDate = (string) ($old['appointment_date'] ?? first_bookable_date());
   // ---- Availability depends on the chosen day, so refresh the times when it changes.
   var dateInput = document.getElementById('appointment_date');
   var slotsBox  = document.getElementById('slots');
+  var closedWeekdays = (dateInput.dataset.closedWeekdays || '').split(',').filter(Boolean).map(Number);
+  var closedDates = (dateInput.dataset.closedDates || '').split(',').filter(Boolean);
+
+  function isClosedDate(date) {
+    if (!date) return true;
+    if (closedDates.indexOf(date) !== -1) return true;
+    var parts = date.split('-');
+    if (parts.length !== 3) return true;
+    var d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+    return closedWeekdays.indexOf(d.getDay()) !== -1;
+  }
 
   function refreshSlots() {
     var date = dateInput.value;
     if (!date) return;
+
+    if (isClosedDate(date)) {
+      slotsBox.querySelectorAll('[data-slot]').forEach(function (label) {
+        var input = label.querySelector('input');
+        var left  = label.querySelector('.slot__left');
+        label.classList.add('slot--full');
+        input.disabled = true;
+        input.checked = false;
+        left.textContent = 'Closed that day';
+      });
+      return;
+    }
 
     fetch('/availability?date=' + encodeURIComponent(date))
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
@@ -212,5 +242,6 @@ $chosenDate = (string) ($old['appointment_date'] ?? first_bookable_date());
   }
 
   dateInput.addEventListener('change', refreshSlots);
+  if (isClosedDate(dateInput.value)) refreshSlots();
 })();
 </script>

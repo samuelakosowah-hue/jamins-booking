@@ -13,8 +13,14 @@ declare(strict_types=1);
  * login disabled), so an un-configured copy of the site cannot leak or misfire.
  */
 return [
-    // REQUIRED. Set a strong password — this guards every client's personal details.
-    'admin_password' => 'change-this-to-something-strong',
+    // REQUIRED. Prefer a bcrypt hash (never commit a plaintext production password).
+    // Generate one:
+    //   /Applications/XAMPP/xamppfiles/bin/php scripts/hash-password.php 'your-strong-password'
+    // Paste the full $2y$… string below.
+    'admin_password' => '$2y$10$replaceWithOutputOfHashPasswordScriptxxxxxxxxxxx',
+
+    // Set true only when TLS is terminated at a reverse proxy you control.
+    // 'trust_proxy' => true,
 
     'sms' => [
         // 'log' keeps SMS off (messages recorded in the Outbox only).

@@ -4,13 +4,13 @@
 <div class="page">
   <p class="eyebrow">Already registered?</p>
   <h1 class="page__title">Find my <em>booking</em></h1>
-  <p class="page__lede">Enter the reference you were given when you booked — it looks like <strong>JNC-4F2A9C</strong>.</p>
+  <p class="page__lede">Enter the reference you were given when you booked — it looks like <strong>JNC-A1B2C3D4E5F6G7H8</strong>.</p>
 
   <form class="form" method="get" action="/lookup" style="margin-bottom:34px">
     <div class="grid2" style="align-items:end">
       <div class="field<?= $notFound ? ' field--bad' : '' ?>">
         <label for="ref">Booking reference</label>
-        <input id="ref" name="ref" type="text" value="<?= e($ref) ?>" placeholder="JNC-4F2A9C" autocapitalize="characters" required>
+        <input id="ref" name="ref" type="text" value="<?= e($ref) ?>" placeholder="JNC-A1B2C3D4E5F6G7H8" autocapitalize="characters" required>
       </div>
       <div>
         <button class="btn btn--orange btn--block" type="submit"><?= icon('search') ?> Look it up</button>

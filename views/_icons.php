@@ -16,6 +16,7 @@ function icon(string $name): string
         'monitor'  => '<path d="M2 12h5l2-5 3 10 2.5-6 1.5 3h6" stroke-linecap="round" stroke-linejoin="round"/>',
         'droplet'  => '<path d="M12 3s6 6.4 6 10.2A6 6 0 0 1 6 13.2C6 9.4 12 3 12 3z"/>',
         'search'   => '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4" stroke-linecap="round"/>',
+        'x'        => '<path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/>',
         'lock'     => '<rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
         'download' => '<path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 19h16" stroke-linecap="round"/>',
         'print'    => '<path d="M7 9V3h10v6"/><rect x="4" y="9" width="16" height="8" rx="2"/><path d="M7 15h10v6H7z"/>',

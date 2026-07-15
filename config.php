@@ -92,11 +92,40 @@ $config = [
 
         // Who gets told when a new appointment lands. Set the real number in config.local.php.
         'admin_recipients' => array_filter([getenv('SMS_ADMIN_PHONE') ?: '']),
+
+        // Day-before reminders (run scripts/send-reminders.php from cron).
+        // days_before: 1 = text clients the calendar day before their appointment.
+        // statuses: only these appointment statuses get a reminder.
+        'reminder_days_before' => 1,
+        'reminder_statuses'    => ['pending', 'confirmed'],
     ],
 
-    // Admin password. A deliberately useless default so an un-configured deployment
-    // cannot be logged into; the real one is set in config.local.php.
+    // Admin password. Prefer a bcrypt/argon2 hash from scripts/hash-password.php
+    // (or `php -r "echo password_hash('…', PASSWORD_DEFAULT);"`).
+    // A deliberately useless default so an un-configured deployment cannot be logged into.
+    // Plaintext still works for local migration, but config.local.php should store a hash.
     'admin_password' => getenv('EVENT_ADMIN_PASSWORD') ?: 'CHANGE-ME-IN-config.local.php',
+
+    // Login brute-force protection (keyed by client IP, stored in SQLite).
+    'login' => [
+        'max_attempts'  => 5,          // failures before a lockout
+        'lockout_mins'  => 15,         // how long the lock lasts
+        'window_mins'   => 15,         // attempt counter window
+    ],
+
+    // PHP date()/strtotime timezone for booking windows and "today".
+    'timezone' => getenv('APP_TIMEZONE') ?: 'Africa/Accra',
+
+    // Only honour X-Forwarded-Proto / similar headers when true (behind a trusted reverse proxy).
+    // Leave false on plain shared hosting so a client cannot spoof HTTPS and Secure cookies.
+    'trust_proxy' => filter_var(getenv('TRUST_PROXY') ?: 'false', FILTER_VALIDATE_BOOL),
+
+    // Weekdays the practice is closed. PHP: 0 = Sunday … 6 = Saturday.
+    'closed_weekdays' => [0],
+
+    // Extra one-off closed dates (Y-m-d). Seed only — live list is managed at /admin/slots
+    // and stored in the database; this array is merged at boot if you need fixed holidays.
+    'closed_dates' => [],
 
     // Runtime behaviour. In production, errors are logged, never shown to visitors.
     'app' => [

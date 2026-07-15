@@ -34,14 +34,70 @@ function start_session(array $config): void
 }
 
 /**
- * Whether the current request reached us over HTTPS, including the common case where
- * TLS is terminated at a load balancer or reverse proxy that sets X-Forwarded-Proto.
+ * Whether the current request reached us over HTTPS.
+ *
+ * X-Forwarded-Proto is only trusted when config trust_proxy is true (set after boot
+ * via set_https_trust_proxy, or pass $trustProxy explicitly).
  */
-function is_https(): bool
+function is_https(?bool $trustProxy = null): bool
 {
-    return ($_SERVER['HTTPS'] ?? '') === 'on'
-        || (int) ($_SERVER['SERVER_PORT'] ?? 0) === 443
-        || strtolower($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+    static $configuredTrust = false;
+    if ($trustProxy !== null) {
+        $configuredTrust = $trustProxy;
+    }
+
+    if (($_SERVER['HTTPS'] ?? '') === 'on' || (int) ($_SERVER['SERVER_PORT'] ?? 0) === 443) {
+        return true;
+    }
+
+    if ($configuredTrust && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') {
+        return true;
+    }
+
+    return false;
+}
+
+/** Call once at boot so session cookies and is_https() share the same trust setting. */
+function set_https_trust_proxy(bool $trust): void
+{
+    is_https($trust);
+}
+
+/**
+ * Best-effort client IP for rate limiting. When trust_proxy is false, ignores X-Forwarded-For.
+ */
+function client_ip(array $config): string
+{
+    if (!empty($config['trust_proxy'])) {
+        $xff = (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
+        if ($xff !== '') {
+            $first = trim(explode(',', $xff)[0]);
+            if (filter_var($first, FILTER_VALIDATE_IP)) {
+                return $first;
+            }
+        }
+    }
+
+    $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+    return filter_var($remote, FILTER_VALIDATE_IP) ? $remote : '0.0.0.0';
+}
+
+/**
+ * Verify the admin password. Accepts a bcrypt/argon2 hash (preferred) or legacy plaintext.
+ */
+function admin_password_ok(string $stored, string $given): bool
+{
+    if ($stored === '' || $given === '') {
+        return false;
+    }
+
+    // bcrypt ($2y$/$2a$/$2b$) and argon2 — preferred production storage.
+    if (preg_match('/^\$(2y|2a|2b|argon2id|argon2i|argon2d)\$/', $stored) === 1) {
+        return password_verify($given, $stored);
+    }
+
+    // Legacy plaintext in config — still constant-time compare.
+    return hash_equals($stored, $given);
 }
 
 // --------------------------------------------------------------------- money
@@ -181,10 +237,46 @@ function is_admin(): bool
     return !empty($_SESSION['admin']);
 }
 
-/** The earliest bookable day: appointments always start tomorrow. */
-function first_bookable_date(): string
+/**
+ * True when the practice is open on this calendar day (weekdays + closed_dates).
+ * Does not check the bookable horizon — use is_bookable_date for that.
+ */
+function is_open_date(string $date, array $config): bool
 {
-    return date('Y-m-d', strtotime('+1 day'));
+    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    if (!$parsed || $parsed->format('Y-m-d') !== $date) {
+        return false;
+    }
+
+    $closedWeekdays = $config['closed_weekdays'] ?? [];
+    if (in_array((int) $parsed->format('w'), $closedWeekdays, true)) {
+        return false;
+    }
+
+    $closedDates = $config['closed_dates'] ?? [];
+    return !in_array($date, $closedDates, true);
+}
+
+/**
+ * The earliest bookable day: tomorrow or the next open day within the horizon.
+ */
+function first_bookable_date(?array $config = null): string
+{
+    $day = new DateTimeImmutable('tomorrow');
+    if ($config === null) {
+        return $day->format('Y-m-d');
+    }
+
+    $last = last_bookable_date($config);
+    while ($day->format('Y-m-d') <= $last) {
+        $ymd = $day->format('Y-m-d');
+        if (is_open_date($ymd, $config)) {
+            return $ymd;
+        }
+        $day = $day->modify('+1 day');
+    }
+
+    return $day->format('Y-m-d');
 }
 
 function last_bookable_date(array $config): string
@@ -192,14 +284,79 @@ function last_bookable_date(array $config): string
     return date('Y-m-d', strtotime('+' . $config['booking_horizon'] . ' days'));
 }
 
-/** True when $date is a real Y-m-d inside the bookable window. */
+/** True when $date is a real Y-m-d inside the bookable window and the practice is open. */
 function is_bookable_date(string $date, array $config): bool
 {
     $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
     if (!$parsed || $parsed->format('Y-m-d') !== $date) {
         return false;
     }
-    return $date >= first_bookable_date() && $date <= last_bookable_date($config);
+    return $date >= first_bookable_date($config)
+        && $date <= last_bookable_date($config)
+        && is_open_date($date, $config);
+}
+
+/**
+ * Validate a time-window row staff are adding or editing.
+ *
+ * @return array{0: array, 1: array}
+ */
+function validate_slot(array $input): array
+{
+    $errors = [];
+
+    $label = trim((string) ($input['label'] ?? ''));
+    if (mb_strlen($label) < 3) {
+        $errors['label'] = 'Give the time window a label (e.g. "8:00 AM – 9:00 AM").';
+    } elseif (mb_strlen($label) > 60) {
+        $errors['label'] = 'Keep the label under 60 characters.';
+    }
+
+    $capacity = filter_var($input['capacity'] ?? '', FILTER_VALIDATE_INT, [
+        'options' => ['min_range' => 1, 'max_range' => 50],
+    ]);
+    if ($capacity === false) {
+        $errors['capacity'] = 'Capacity must be a whole number between 1 and 50.';
+    }
+
+    $position = filter_var($input['position'] ?? 0, FILTER_VALIDATE_INT, [
+        'options' => ['min_range' => 0, 'max_range' => 999],
+    ]);
+
+    $clean = [
+        'label'    => $label,
+        'capacity' => $capacity === false ? 1 : $capacity,
+        'position' => $position === false ? 0 : $position,
+    ];
+
+    return [$clean, $errors];
+}
+
+/**
+ * Validate a one-off closed date staff are adding.
+ *
+ * @return array{0: array, 1: array}
+ */
+function validate_closed_date(array $input): array
+{
+    $errors = [];
+    $date = trim((string) ($input['date'] ?? ''));
+    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    if (!$parsed || $parsed->format('Y-m-d') !== $date) {
+        $errors['date'] = 'Pick a valid date.';
+    } elseif ($date < date('Y-m-d')) {
+        $errors['date'] = 'Closed dates must be today or in the future.';
+    }
+
+    $reason = trim((string) ($input['reason'] ?? ''));
+    if (mb_strlen($reason) > 120) {
+        $errors['reason'] = 'Keep the reason under 120 characters.';
+    }
+
+    return [
+        ['date' => $date, 'reason' => $reason !== '' ? $reason : null],
+        $errors,
+    ];
 }
 
 function pretty_date(string $date): string
@@ -264,6 +421,91 @@ function validate_service(array $input, array $config): array
 }
 
 // -------------------------------------------------------------------- reviews
+
+/**
+ * Whether two phone numbers refer to the same Ghanaian subscriber.
+ * Used to prove the person cancelling holds the booking (ref alone is not enough).
+ */
+function phones_match(string $a, string $b, array $config): bool
+{
+    $na = sms_normalise($a, $config);
+    $nb = sms_normalise($b, $config);
+    if ($na !== null && $nb !== null) {
+        return hash_equals($na, $nb);
+    }
+
+    $digits = static fn(string $p): string => preg_replace('/\D+/', '', $p) ?? '';
+    $da = $digits($a);
+    $db = $digits($b);
+    return $da !== '' && $db !== '' && hash_equals($da, $db);
+}
+
+/**
+ * Whether the client may cancel this appointment themselves online.
+ *
+ * @return array{0: bool, 1: string} [allowed, reason when not]
+ */
+function client_cancel_eligibility(array $booking): array
+{
+    if ($booking['status'] === 'cancelled') {
+        return [false, 'This appointment is already cancelled.'];
+    }
+
+    if ($booking['status'] === 'checked_in') {
+        return [false, 'This appointment has already been marked as seen, so it cannot be cancelled online.'];
+    }
+
+    if (!in_array($booking['status'], ['pending', 'confirmed'], true)) {
+        return [false, 'This appointment cannot be cancelled online. Please call the practice.'];
+    }
+
+    // Same-day and future only — past appointments are history.
+    if ($booking['appointment_date'] < date('Y-m-d')) {
+        return [false, 'This appointment date has already passed.'];
+    }
+
+    return [true, ''];
+}
+
+/**
+ * Validate a client self-cancel attempt (reference + phone must match).
+ *
+ * @return array{0: ?array, 1: array} [booking when ok, errors]
+ */
+function validate_client_cancel(array $input, array $config, PDO $pdo): array
+{
+    $errors = [];
+    $ref = strtoupper(trim((string) ($input['ref'] ?? '')));
+    $phone = trim((string) ($input['phone'] ?? ''));
+
+    if ($ref === '') {
+        $errors['ref'] = 'Enter your booking reference.';
+    }
+
+    if ($phone === '') {
+        $errors['phone'] = 'Enter the phone number you used when booking.';
+    }
+
+    $booking = $ref !== '' ? find_booking($pdo, $ref) : null;
+    if ($ref !== '' && !$booking) {
+        $errors['ref'] = 'No booking matches that reference.';
+    }
+
+    if ($booking && $phone !== '' && !phones_match($phone, $booking['phone'], $config)) {
+        // Same generic wording as a missing booking — do not confirm the ref exists
+        // to someone who does not know the phone number.
+        $errors['phone'] = 'That reference and phone number do not match our records.';
+    }
+
+    if ($booking && $phone !== '' && phones_match($phone, $booking['phone'], $config)) {
+        [$ok, $reason] = client_cancel_eligibility($booking);
+        if (!$ok) {
+            $errors['ref'] = $reason;
+        }
+    }
+
+    return [$booking, $errors];
+}
 
 /**
  * Whether this booking may be reviewed yet, and why not if it can't.
@@ -382,8 +624,14 @@ function validate_booking(array $input, array $config, PDO $pdo): array
 
     $date = trim($input['appointment_date'] ?? '');
     if (!is_bookable_date($date, $config)) {
-        $errors['appointment_date'] = 'Pick a date between tomorrow and '
-            . pretty_date(last_bookable_date($config)) . '.';
+        if ($date !== '' && is_open_date($date, $config) === false
+            && DateTimeImmutable::createFromFormat('!Y-m-d', $date)?->format('Y-m-d') === $date) {
+            $errors['appointment_date'] = 'The practice is closed that day — please pick another date.';
+        } else {
+            $errors['appointment_date'] = 'Pick an open date between '
+                . pretty_date(first_bookable_date($config)) . ' and '
+                . pretty_date(last_bookable_date($config)) . '.';
+        }
     }
 
     $slotId = filter_var($input['slot_id'] ?? '', FILTER_VALIDATE_INT) ?: 0;

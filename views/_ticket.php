@@ -63,12 +63,20 @@ $items = booking_line_items($config, $booking);
   </div>
 </div>
 
-<?php [$canReview] = review_eligibility($booking); ?>
+<?php
+[$canReview] = review_eligibility($booking);
+[$canCancel] = client_cancel_eligibility($booking);
+?>
 
 <div class="hero__cta noprint" style="justify-content:center;margin-top:28px">
   <?php if ($canReview): ?>
     <a class="btn btn--green" href="/review?ref=<?= e(urlencode($booking['reference'])) ?>">
       <?= star_svg('full') ?> Rate this service
+    </a>
+  <?php endif ?>
+  <?php if ($canCancel): ?>
+    <a class="btn btn--ghost" href="/cancel?ref=<?= e(urlencode($booking['reference'])) ?>">
+      Cancel appointment
     </a>
   <?php endif ?>
   <button class="btn btn--maroon" onclick="window.print()"><?= icon('print') ?> Print / save as PDF</button>

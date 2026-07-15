@@ -4,7 +4,10 @@ declare(strict_types=1);
 function db(array $config): PDO
 {
     static $pdo = null;
-    if ($pdo instanceof PDO) {
+    static $path = null;
+
+    // Reconnect when the path changes (tests use a throwaway database).
+    if ($pdo instanceof PDO && $path === $config['db_path']) {
         return $pdo;
     }
 
@@ -13,6 +16,7 @@ function db(array $config): PDO
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     ]);
+    $path = $config['db_path'];
     $pdo->exec('PRAGMA foreign_keys = ON');
 
     $pdo->exec('
@@ -88,6 +92,25 @@ function db(array $config): PDO
             comment    TEXT,
             published  INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
+        )
+    ');
+
+    // One-off holidays / closed days (Y-m-d). Weekday closures live in config.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS closed_dates (
+            date       TEXT PRIMARY KEY,
+            reason     TEXT,
+            created_at TEXT NOT NULL
+        )
+    ');
+
+    // Brute-force tracker for /admin/login (one row per IP).
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            ip           TEXT PRIMARY KEY,
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            first_at     TEXT NOT NULL,
+            locked_until TEXT
         )
     ');
 
@@ -311,7 +334,8 @@ function create_booking(PDO $pdo, array $data): string
             throw new RuntimeException('That appointment time just filled up. Please choose another.');
         }
 
-        $reference = 'JNC-' . strtoupper(bin2hex(random_bytes(3)));
+        // 16 hex chars (64 bits of entropy) — short enough for SMS, hard to guess.
+        $reference = 'JNC-' . strtoupper(bin2hex(random_bytes(8)));
         $stmt = $pdo->prepare('
             INSERT INTO bookings
                 (reference, full_name, phone, email, location, gender, age, services,
@@ -397,7 +421,53 @@ function booking_stats(PDO $pdo): array
 function set_booking_status(PDO $pdo, string $reference, string $status): void
 {
     $stmt = $pdo->prepare('UPDATE bookings SET status = ? WHERE reference = ?');
-    $stmt->execute([$status, $reference]);
+    $stmt->execute([$status, strtoupper(trim($reference))]);
+}
+
+/**
+ * Upcoming appointments on a given calendar day that still need a reminder SMS.
+ *
+ * A booking is due when:
+ *  - appointment_date matches $date
+ *  - status is one of $statuses (typically pending / confirmed)
+ *  - no successful or logged reminder has been recorded yet
+ *
+ * @param  list<string> $statuses
+ * @return list<array>
+ */
+function bookings_due_for_reminder(PDO $pdo, string $date, array $statuses): array
+{
+    if (!$statuses) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($statuses), '?'));
+    $sql = "
+        SELECT b.*, s.label AS slot_label
+        FROM bookings b
+        JOIN slots s ON s.id = b.slot_id
+        WHERE b.appointment_date = ?
+          AND b.status IN ({$placeholders})
+          AND NOT EXISTS (
+              SELECT 1 FROM messages m
+              WHERE m.booking_id = b.id
+                AND m.kind = 'reminder'
+                AND m.status IN ('sent', 'logged', 'queued')
+          )
+        ORDER BY s.position, b.id
+    ";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(array_merge([$date], array_values($statuses)));
+    return $stmt->fetchAll();
+}
+
+/** True when any message of this kind already exists for the booking (any status). */
+function booking_has_message_kind(PDO $pdo, int $bookingId, string $kind): bool
+{
+    $stmt = $pdo->prepare('SELECT 1 FROM messages WHERE booking_id = ? AND kind = ? LIMIT 1');
+    $stmt->execute([$bookingId, $kind]);
+    return (bool) $stmt->fetchColumn();
 }
 
 /** Move an appointment to a different day and/or window. Capacity is checked by the caller. */
@@ -546,4 +616,143 @@ function set_review_published(PDO $pdo, int $reviewId, bool $published): void
 {
     $stmt = $pdo->prepare('UPDATE reviews SET published = ? WHERE id = ?');
     $stmt->execute([$published ? 1 : 0, $reviewId]);
+}
+
+// ---------------------------------------------------------------------- slots
+
+/** Every time window, ordered for display. */
+function all_slots(PDO $pdo): array
+{
+    return $pdo->query('SELECT * FROM slots ORDER BY position, id')->fetchAll();
+}
+
+/**
+ * How many bookings reference this slot.
+ *
+ * @param bool $activeOnly When true, ignore cancelled (for capacity display).
+ *                         When false, count every row (for delete guards / FK).
+ */
+function slot_booking_count(PDO $pdo, int $slotId, bool $activeOnly = true): int
+{
+    $sql = 'SELECT COUNT(*) FROM bookings WHERE slot_id = ?'
+         . ($activeOnly ? ' AND status != "cancelled"' : '');
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([$slotId]);
+    return (int) $stmt->fetchColumn();
+}
+
+function insert_slot(PDO $pdo, array $data): void
+{
+    $stmt = $pdo->prepare('INSERT INTO slots (label, capacity, position) VALUES (?, ?, ?)');
+    $stmt->execute([$data['label'], $data['capacity'], $data['position']]);
+}
+
+function update_slot(PDO $pdo, int $id, array $data): void
+{
+    $stmt = $pdo->prepare('UPDATE slots SET label = ?, capacity = ?, position = ? WHERE id = ?');
+    $stmt->execute([$data['label'], $data['capacity'], $data['position'], $id]);
+}
+
+function delete_slot(PDO $pdo, int $id): void
+{
+    $stmt = $pdo->prepare('DELETE FROM slots WHERE id = ?');
+    $stmt->execute([$id]);
+}
+
+// ---------------------------------------------------------------- closed dates
+
+/** @return list<string> Y-m-d values */
+function load_closed_dates(PDO $pdo): array
+{
+    return $pdo->query('SELECT date FROM closed_dates ORDER BY date')->fetchAll(PDO::FETCH_COLUMN);
+}
+
+/** @return list<array{date: string, reason: ?string, created_at: string}> */
+function all_closed_dates(PDO $pdo): array
+{
+    return $pdo->query('SELECT date, reason, created_at FROM closed_dates ORDER BY date')->fetchAll();
+}
+
+function add_closed_date(PDO $pdo, string $date, ?string $reason): void
+{
+    $stmt = $pdo->prepare('INSERT OR REPLACE INTO closed_dates (date, reason, created_at) VALUES (?, ?, ?)');
+    $stmt->execute([$date, $reason, date('c')]);
+}
+
+function remove_closed_date(PDO $pdo, string $date): void
+{
+    $stmt = $pdo->prepare('DELETE FROM closed_dates WHERE date = ?');
+    $stmt->execute([$date]);
+}
+
+// -------------------------------------------------------------- login attempts
+
+/**
+ * Whether this IP is currently locked out of admin login.
+ *
+ * @return array{0: bool, 1: int} [locked, seconds remaining]
+ */
+function login_is_locked(PDO $pdo, string $ip, array $loginConfig): array
+{
+    $stmt = $pdo->prepare('SELECT attempts, first_at, locked_until FROM login_attempts WHERE ip = ?');
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return [false, 0];
+    }
+
+    if (!empty($row['locked_until'])) {
+        $until = strtotime($row['locked_until']);
+        if ($until !== false && $until > time()) {
+            return [true, $until - time()];
+        }
+        // Lock expired — clear the row so they get a fresh window.
+        login_clear_attempts($pdo, $ip);
+        return [false, 0];
+    }
+
+    return [false, 0];
+}
+
+function login_record_failure(PDO $pdo, string $ip, array $loginConfig): void
+{
+    $max     = (int) ($loginConfig['max_attempts'] ?? 5);
+    $lockMin = (int) ($loginConfig['lockout_mins'] ?? 15);
+    $winMin  = (int) ($loginConfig['window_mins'] ?? 15);
+    $now     = date('c');
+
+    $stmt = $pdo->prepare('SELECT attempts, first_at, locked_until FROM login_attempts WHERE ip = ?');
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+
+    if (!$row) {
+        $ins = $pdo->prepare('INSERT INTO login_attempts (ip, attempts, first_at, locked_until) VALUES (?, 1, ?, NULL)');
+        $ins->execute([$ip, $now]);
+        return;
+    }
+
+    $firstAt = strtotime((string) $row['first_at']) ?: time();
+    $attempts = (int) $row['attempts'];
+
+    // Outside the rolling window — start over.
+    if ((time() - $firstAt) > $winMin * 60) {
+        $upd = $pdo->prepare('UPDATE login_attempts SET attempts = 1, first_at = ?, locked_until = NULL WHERE ip = ?');
+        $upd->execute([$now, $ip]);
+        return;
+    }
+
+    $attempts++;
+    $lockedUntil = null;
+    if ($attempts >= $max) {
+        $lockedUntil = date('c', time() + $lockMin * 60);
+    }
+
+    $upd = $pdo->prepare('UPDATE login_attempts SET attempts = ?, locked_until = ? WHERE ip = ?');
+    $upd->execute([$attempts, $lockedUntil, $ip]);
+}
+
+function login_clear_attempts(PDO $pdo, string $ip): void
+{
+    $stmt = $pdo->prepare('DELETE FROM login_attempts WHERE ip = ?');
+    $stmt->execute([$ip]);
 }

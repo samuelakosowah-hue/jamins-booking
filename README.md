@@ -33,21 +33,28 @@ rather than exposing anything.
 | `/availability?date=…` | JSON: how many places remain in each window that day |
 | `/confirmed?ref=…` | Printable ticket with the reference and cost estimate |
 | `/lookup` | Client finds their booking by reference |
+| `/cancel` | Client cancels online (reference + phone on the booking) |
 | `/review?ref=…` | Client rates a completed appointment (1–5 stars + comment) |
 | `/admin` | Staff dashboard — confirm, mark seen, reschedule, cancel, moderate reviews |
 | `/admin/services` | Add services, edit prices, reorder, retire, delete |
+| `/admin/slots` | Time windows (capacity), one-off closed dates |
 | `/admin/messages` | SMS outbox — every message sent or logged, with retry |
 | `/admin/export` | Downloads all bookings as CSV |
 
 ## Admin access
 
-Default password: **`jamins2026`**
-
-Change it before you put this anywhere public:
+Set a strong password in **`config.local.php`**. Prefer a **bcrypt hash**, not plaintext:
 
 ```bash
-EVENT_ADMIN_PASSWORD='something-better' /Applications/XAMPP/xamppfiles/bin/php -S localhost:8123 ...
+/Applications/XAMPP/xamppfiles/bin/php scripts/hash-password.php 'your-strong-password'
 ```
+
+Paste the `$2y$…` output as `admin_password`. Plaintext still works for local migration only.
+
+Admin login is **CSRF-protected**, **rate-limited** (5 failures / 15 minutes per IP), and uses
+`password_verify` for hashed secrets. Session cookies are `HttpOnly` + `SameSite=Lax`, and
+`Secure` only when the request is truly HTTPS (`trust_proxy` must be enabled if TLS terminates
+at a reverse proxy you control).
 
 ## Configuration
 
@@ -91,8 +98,15 @@ always correct.
 8–9am the day after untouched. The booking form re-fetches `/availability` whenever the
 client changes the date; the server re-checks capacity again on submit regardless.
 
-Time windows are seeded **only when the database is first created**. To change them after
-bookings exist, edit the `slots` table directly.
+Time windows are seeded when the database is first created. After that, manage them at
+**`/admin/slots`** (label, capacity, order). Deleting a window is only allowed when no
+booking still references it.
+
+### Closed days
+
+- **`closed_weekdays`** in `config.php` (default: Sunday = `0`) blocks that weekday every week.
+- One-off holidays and leave days are managed at **`/admin/slots`** and stored in the
+  `closed_dates` table. Clients cannot book those days; staff cannot reschedule onto them.
 
 ## SMS notifications
 
@@ -129,6 +143,34 @@ The sender ID must be approved by mNotify (max 11 characters). All SMS settings 
 - Re-clicking Confirm does not re-text the client — notifications fire only on an actual
   status change. Failed reschedule attempts send nothing.
 
+### Day-before reminders
+
+Clients with a **pending** or **confirmed** appointment get a reminder SMS the calendar day
+before (configurable via `sms.reminder_days_before`). Run once daily from cron:
+
+```bash
+# Example: 8:00 AM Africa/Accra every day
+0 8 * * * /Applications/XAMPP/xamppfiles/bin/php /path/to/event-booking/scripts/send-reminders.php
+
+# Preview without sending:
+php scripts/send-reminders.php --dry-run
+php scripts/send-reminders.php --date=2026-07-20 --dry-run
+```
+
+Already-reminded bookings are skipped (a `reminder` row in `messages` with status
+`sent` / `logged` / `queued`). Cancelled and checked-in appointments are never reminded.
+
+## Client self-cancel
+
+At `/cancel` (also linked from the booking ticket when allowed), a client enters:
+
+1. Their booking reference  
+2. The **phone number on the booking** (formatting variants match)
+
+Only **pending** or **confirmed** appointments on today or a future day can be cancelled
+online. Past, checked-in, or already-cancelled bookings are blocked. Cancel frees the
+slot and sends the usual cancellation SMS.
+
 ## Ratings
 
 A client rates their **appointment**, not each service individually — one review per booking,
@@ -164,7 +206,10 @@ With no reviews, the star UI does not render at all; there is no "0.0 (0)" on a 
 - `migrate()` in `src/db.php` adds missing columns on boot, so an existing
   `bookings.sqlite` picks up schema changes without being deleted. It must run **before**
   any `CREATE INDEX` naming a column it adds.
-- Booking references are prefixed `JNC-`.
+- Booking references are prefixed `JNC-` plus 16 hex characters (64 bits of entropy).
+- Timezone is **`Africa/Accra`** by default (`APP_TIMEZONE` / `config.php`).
+- Database backups: `scripts/backup-db.sh` copies `data/bookings.sqlite` into `data/backups/`.
+- Tests (no Composer): `php tests/run.php`
 - The brand mark is inline SVG in [`views/_logos.php`](views/_logos.php) — there are no
   image files anywhere in the project, so it works fully offline.
 - The ticket and the admin list both have print stylesheets (`Print / save as PDF`).
@@ -172,17 +217,20 @@ With no reviews, the star UI does not render at all; there is no "0.0 (0)" on a 
 ## Layout
 
 ```
-config.php          branding, contact, services + price bands, slots, admin password
+config.php          branding, contact, seed services/slots, security defaults
+config.local.php    secrets (git-ignored): password hash, SMS key
 public/index.php    front controller + router
 public/assets/      stylesheet
-src/db.php          schema, migration, seeding, queries, review aggregation
+src/db.php          schema, migration, seeding, queries, login rate limits
 src/sms.php         phone normalisation, mNotify driver, message templates
-src/helpers.php     escaping, CSRF, session, validation, money, stars, view rendering
+src/helpers.php     escaping, CSRF, session, validation, money, stars, views
 views/              layout + one file per page
-views/admin_services.php  add / edit / reorder / retire / delete services
-views/admin_messages.php  SMS outbox with delivery status and retry
-views/review*.php   rating form + its "too early" / "already done" / "no such booking" states
-views/_icons.php    inline SVG icon set (one per service) + star_svg()
-views/_logos.php    inline SVG Jamin's brand mark
-data/               SQLite database + session files (created on first run)
+views/admin_services.php  services & prices
+views/admin_slots.php     time windows + closed dates
+views/admin_messages.php  SMS outbox with retry
+scripts/hash-password.php bcrypt helper for admin_password
+scripts/send-reminders.php day-before reminder SMS (cron)
+scripts/backup-db.sh      SQLite backup into data/backups/
+tests/run.php             full test suite (zero dependencies)
+data/               SQLite database + sessions + backups (created on first run)
 ```

@@ -4,6 +4,21 @@ This is a self-contained PHP + SQLite app. There is no build step, no Composer, 
 npm, and no separate database server to set up — SQLite is a single file the app
 creates itself. Any ordinary PHP web host will run it.
 
+**Security checklist before go-live**
+
+1. Put a **bcrypt hash** of a strong password in `config.local.php` (`php scripts/hash-password.php '…'`).
+2. Point the document root at **`public/`** only.
+3. Confirm `data/` is not web-readable (`.htaccess` is included).
+4. Turn on **HTTPS**. If TLS terminates at a reverse proxy, set `'trust_proxy' => true` in
+   `config.local.php` so session cookies can be marked Secure correctly.
+5. Keep SMS keys only in `config.local.php` (never in git).
+6. Optionally schedule `scripts/backup-db.sh` daily.
+7. Schedule day-before SMS reminders (adjust the PHP path for your host):
+
+```cron
+0 8 * * * /usr/bin/php /home/you/event-booking/scripts/send-reminders.php >> /home/you/event-booking/data/reminders.log 2>&1
+```
+
 ---
 
 ## 1. What the host must provide
@@ -132,7 +147,7 @@ Open the site. On the first request the app creates `data/bookings.sqlite`, seed
 
 - [ ] Document root points at `public/`.
 - [ ] HTTPS works and HTTP redirects to it.
-- [ ] `config.local.php` has a **strong** admin password (not `jamins2026`).
+- [ ] `config.local.php` has a **strong** admin password (a bcrypt hash, not a weak default).
 - [ ] `data/` is writable — a test booking saves and appears in `/admin`.
 - [ ] A test booking sends the SMS (check `/admin/messages`).
 - [ ] mNotify has enough **SMS credits** (each booking = 2 messages; each

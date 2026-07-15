@@ -227,6 +227,11 @@ function sms_template(string $kind, array $config, array $booking): string
             "Hi {$first}, your appointment {$ref} on {$date} has been CANCELLED. "
             . "Call {$phone} to rebook. - {$co['name']}",
 
+        'reminder' =>
+            "Reminder: Hi {$first}, your appointment {$ref} with {$co['name']} is tomorrow "
+            . "({$date}) at {$time}. Venue: {$co['location']}. "
+            . "Services: {$services}. Call {$phone} if you need to cancel.",
+
         'admin_new' =>
             "NEW BOOKING {$ref}. {$booking['full_name']} ({$booking['phone']}) from "
             . "{$booking['location']}. {$date} at {$time}. Services: {$services}.",
@@ -259,4 +264,50 @@ function sms_notify_client(PDO $pdo, array $config, array $booking, string $kind
 {
     sms_send($pdo, $config, $booking['phone'], sms_template($kind, $config, $booking),
         $kind, (int) $booking['id'], 'client');
+}
+
+/**
+ * Send day-before (or N-day) reminder texts for appointments that still need one.
+ *
+ * Safe to run repeatedly: already-reminded bookings are skipped via the messages table.
+ *
+ * @return array{date: string, sent: int, skipped: int, failed: int, bookings: list<string>}
+ */
+function sms_send_reminders(PDO $pdo, array $config, ?string $forDate = null): array
+{
+    $daysBefore = (int) ($config['sms']['reminder_days_before'] ?? 1);
+    $statuses   = $config['sms']['reminder_statuses'] ?? ['pending', 'confirmed'];
+    $targetDate = $forDate ?? date('Y-m-d', strtotime("+{$daysBefore} day"));
+
+    $due = bookings_due_for_reminder($pdo, $targetDate, $statuses);
+
+    $sent = $failed = 0;
+    $refs = [];
+
+    foreach ($due as $booking) {
+        $result = sms_send(
+            $pdo,
+            $config,
+            $booking['phone'],
+            sms_template('reminder', $config, $booking),
+            'reminder',
+            (int) $booking['id'],
+            'client'
+        );
+
+        $refs[] = $booking['reference'];
+        if (in_array($result['status'], ['sent', 'logged'], true)) {
+            $sent++;
+        } else {
+            $failed++;
+        }
+    }
+
+    return [
+        'date'     => $targetDate,
+        'sent'     => $sent,
+        'skipped'  => 0,
+        'failed'   => $failed,
+        'bookings' => $refs,
+    ];
 }

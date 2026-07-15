@@ -16,6 +16,10 @@ require dirname(__DIR__) . '/src/sms.php';
 require dirname(__DIR__) . '/views/_icons.php';
 require dirname(__DIR__) . '/views/_logos.php';
 
+// Booking windows, "today", and review eligibility all use this zone.
+date_default_timezone_set($config['timezone'] ?? 'Africa/Accra');
+set_https_trust_proxy(!empty($config['trust_proxy']));
+
 // In production, never show PHP errors to a visitor — log them where only staff can
 // look. Debug mode (APP_DEBUG=true) restores on-screen errors for local development.
 if ($config['app']['debug']) {
@@ -53,6 +57,12 @@ $pdo = db($config);
 $config['services']     = load_services($pdo, true);
 $config['services_all'] = load_services($pdo, false);
 
+// Config weekdays + config seed holidays + DB-managed closed dates.
+$config['closed_dates'] = array_values(array_unique(array_merge(
+    $config['closed_dates'] ?? [],
+    load_closed_dates($pdo)
+)));
+
 $path   = rtrim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/', '/') ?: '/';
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -85,7 +95,7 @@ switch (true) {
     case $path === '/book' && $method === 'GET':
         render('book', [
             'config'  => $config,
-            'slots'   => slots_for_date($pdo, first_bookable_date()),
+            'slots'   => slots_for_date($pdo, first_bookable_date($config)),
             'old'     => [],
             'errors'  => [],
             'expired' => false,
@@ -98,7 +108,7 @@ switch (true) {
         $date = (string) ($_POST['appointment_date'] ?? '');
         $slotsForForm = slots_for_date(
             $pdo,
-            is_bookable_date($date, $config) ? $date : first_bookable_date()
+            is_bookable_date($date, $config) ? $date : first_bookable_date($config)
         );
 
         // A stale token means the session lapsed, not that anything is wrong with the
@@ -248,17 +258,139 @@ switch (true) {
         ]);
         break;
 
+    // ---------------------------------------------------------- client cancel
+    case $path === '/cancel' && $method === 'GET':
+        $ref = strtoupper(trim((string) ($_GET['ref'] ?? '')));
+        $booking = $ref !== '' ? find_booking($pdo, $ref) : null;
+
+        if ($ref !== '' && $booking) {
+            [$ok, $reason] = client_cancel_eligibility($booking);
+            if (!$ok) {
+                render('cancel_blocked', [
+                    'config'  => $config,
+                    'booking' => $booking,
+                    'reason'  => $reason,
+                ]);
+                break;
+            }
+        }
+
+        render('cancel', [
+            'config'  => $config,
+            'booking' => $booking,
+            'ref'     => $ref,
+            'old'     => ['ref' => $ref, 'phone' => ''],
+            'errors'  => [],
+            'expired' => false,
+        ]);
+        break;
+
+    case $path === '/cancel' && $method === 'POST':
+        if (!csrf_check()) {
+            $ref = strtoupper(trim((string) ($_POST['ref'] ?? '')));
+            render('cancel', [
+                'config'  => $config,
+                'booking' => $ref !== '' ? find_booking($pdo, $ref) : null,
+                'ref'     => $ref,
+                'old'     => $_POST,
+                'errors'  => [],
+                'expired' => true,
+            ]);
+            break;
+        }
+
+        [$booking, $errors] = validate_client_cancel($_POST, $config, $pdo);
+
+        if ($errors || !$booking) {
+            $ref = strtoupper(trim((string) ($_POST['ref'] ?? '')));
+            render('cancel', [
+                'config'  => $config,
+                // Only re-show the ticket when phone matched; otherwise do not leak existence.
+                'booking' => ($booking && empty($errors['phone']) && empty($errors['ref']))
+                    ? $booking
+                    : ($ref !== '' && empty($errors['phone']) ? find_booking($pdo, $ref) : null),
+                'ref'     => $ref,
+                'old'     => $_POST,
+                'errors'  => $errors,
+                'expired' => false,
+            ]);
+            break;
+        }
+
+        // Re-check eligibility at write time (status may have changed).
+        [$ok, $reason] = client_cancel_eligibility($booking);
+        if (!$ok) {
+            render('cancel_blocked', [
+                'config'  => $config,
+                'booking' => $booking,
+                'reason'  => $reason,
+            ]);
+            break;
+        }
+
+        set_booking_status($pdo, $booking['reference'], 'cancelled');
+        $booking['status'] = 'cancelled';
+        sms_notify_client($pdo, $config, $booking, 'cancelled');
+
+        render('cancel_done', [
+            'config'  => $config,
+            'booking' => $booking,
+        ]);
+        break;
+
     // ----------------------------------------------------------------- admin
     case $path === '/admin/login' && $method === 'GET':
+        if (is_admin()) {
+            redirect('/admin');
+        }
         render('admin_login', ['config' => $config, 'error' => null]);
         break;
 
     case $path === '/admin/login' && $method === 'POST':
-        if (hash_equals($config['admin_password'], (string) ($_POST['password'] ?? ''))) {
+        if (is_admin()) {
+            redirect('/admin');
+        }
+
+        $ip = client_ip($config);
+        [$locked, $retryIn] = login_is_locked($pdo, $ip, $config['login']);
+        if ($locked) {
+            $mins = max(1, (int) ceil($retryIn / 60));
+            render('admin_login', [
+                'config' => $config,
+                'error'  => "Too many failed attempts. Try again in about {$mins} minute"
+                    . ($mins === 1 ? '' : 's') . '.',
+            ]);
+            break;
+        }
+
+        if (!csrf_check()) {
+            render('admin_login', [
+                'config' => $config,
+                'error'  => 'Your session expired — please try signing in again.',
+            ]);
+            break;
+        }
+
+        $password = (string) ($_POST['password'] ?? '');
+        if (admin_password_ok((string) $config['admin_password'], $password)) {
+            login_clear_attempts($pdo, $ip);
             session_regenerate_id(true);
             $_SESSION['admin'] = true;
             redirect('/admin');
         }
+
+        login_record_failure($pdo, $ip, $config['login']);
+        [$nowLocked, $retryIn] = login_is_locked($pdo, $ip, $config['login']);
+        if ($nowLocked) {
+            $mins = max(1, (int) ceil($retryIn / 60));
+            render('admin_login', [
+                'config' => $config,
+                'error'  => "Too many failed attempts. Try again in about {$mins} minute"
+                    . ($mins === 1 ? '' : 's') . '.',
+            ]);
+            break;
+        }
+
         render('admin_login', ['config' => $config, 'error' => 'Incorrect password.']);
         break;
 
@@ -281,6 +413,123 @@ switch (true) {
             'sms'      => message_stats($pdo),
             'moved'    => $_GET['moved'] ?? '',
         ]);
+        break;
+
+    // ---------------------------------------------------------- hours & slots
+    case $path === '/admin/slots' && $method === 'GET':
+        if (!is_admin()) {
+            redirect('/admin/login');
+        }
+        $slotsList = all_slots($pdo);
+        $slotUsage = [];
+        $slotTotal = [];
+        foreach ($slotsList as $s) {
+            $sid = (int) $s['id'];
+            $slotUsage[$sid] = slot_booking_count($pdo, $sid, true);
+            $slotTotal[$sid] = slot_booking_count($pdo, $sid, false);
+        }
+        render('admin_slots', [
+            'config'      => $config,
+            'slots'       => $slotsList,
+            'usage'       => $slotUsage,
+            'totals'      => $slotTotal,
+            'closedDates' => all_closed_dates($pdo),
+            'old'         => [],
+            'errors'      => [],
+            'editing'     => filter_var($_GET['edit'] ?? '', FILTER_VALIDATE_INT) ?: 0,
+            'flash'       => $_GET['ok'] ?? '',
+            'closedError' => '',
+            'closedOld'   => [],
+        ]);
+        break;
+
+    case $path === '/admin/slots' && $method === 'POST':
+        if (!is_admin() || !csrf_check()) {
+            http_response_code(403);
+            exit('Forbidden');
+        }
+
+        $action = (string) ($_POST['action'] ?? 'save');
+        $id     = filter_var($_POST['id'] ?? '', FILTER_VALIDATE_INT) ?: 0;
+
+        $renderSlots = function (array $extra) use ($pdo, $config): void {
+            $slotsList = all_slots($pdo);
+            $slotUsage = [];
+            $slotTotal = [];
+            foreach ($slotsList as $s) {
+                $sid = (int) $s['id'];
+                $slotUsage[$sid] = slot_booking_count($pdo, $sid, true);
+                $slotTotal[$sid] = slot_booking_count($pdo, $sid, false);
+            }
+            render('admin_slots', array_merge([
+                'config'      => $config,
+                'slots'       => $slotsList,
+                'usage'       => $slotUsage,
+                'totals'      => $slotTotal,
+                'closedDates' => all_closed_dates($pdo),
+                'old'         => [],
+                'errors'      => [],
+                'editing'     => 0,
+                'flash'       => '',
+                'closedError' => '',
+                'closedOld'   => [],
+            ], $extra));
+        };
+
+        if ($action === 'add_closed') {
+            [$clean, $errors] = validate_closed_date($_POST);
+            if ($errors) {
+                $renderSlots([
+                    'closedError' => $errors['date'] ?? $errors['reason'] ?? 'Could not add that date.',
+                    'closedOld'   => $_POST,
+                ]);
+                break;
+            }
+            add_closed_date($pdo, $clean['date'], $clean['reason']);
+            redirect('/admin/slots?ok=closed_added');
+        }
+
+        if ($action === 'remove_closed') {
+            $date = trim((string) ($_POST['date'] ?? ''));
+            if ($date !== '') {
+                remove_closed_date($pdo, $date);
+            }
+            redirect('/admin/slots?ok=closed_removed');
+        }
+
+        if ($action === 'delete' && $id && find_slot($pdo, $id)) {
+            if (slot_booking_count($pdo, $id, false) === 0) {
+                delete_slot($pdo, $id);
+                redirect('/admin/slots?ok=deleted');
+            }
+            redirect('/admin/slots?ok=delete_blocked');
+        }
+
+        [$clean, $errors] = validate_slot($_POST);
+        if ($errors) {
+            $renderSlots([
+                'old'     => $_POST,
+                'errors'  => $errors,
+                'editing' => $id,
+            ]);
+            break;
+        }
+
+        try {
+            if ($id && find_slot($pdo, $id)) {
+                update_slot($pdo, $id, $clean);
+                redirect('/admin/slots?ok=updated');
+            }
+            insert_slot($pdo, $clean);
+            redirect('/admin/slots?ok=added');
+        } catch (PDOException $e) {
+            // slots.label is UNIQUE
+            $renderSlots([
+                'old'     => $_POST,
+                'errors'  => ['label' => 'That time window label is already in use.'],
+                'editing' => $id,
+            ]);
+        }
         break;
 
     // ------------------------------------------------------- managing services

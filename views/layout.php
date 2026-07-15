@@ -31,6 +31,7 @@ $co = $config['company'];
   <nav class="topnav">
     <a href="/#prices">Price list</a>
     <a href="/lookup">Find my booking</a>
+    <a href="/cancel">Cancel</a>
     <a class="btn btn--sm btn--orange" href="/book">Book appointment</a>
   </nav>
 </header>

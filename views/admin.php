@@ -15,7 +15,8 @@ $liveSms = $config['sms']['driver'] !== 'log';
   <h1 class="page__title">Appointments</h1>
 
   <div class="admin__bar">
-    <a class="btn btn--maroon btn--sm" href="/admin/services"><?= icon('tag') ?> Manage services &amp; prices</a>
+    <a class="btn btn--maroon btn--sm" href="/admin/services"><?= icon('tag') ?> Services &amp; prices</a>
+    <a class="btn btn--maroon btn--sm" href="/admin/slots"><?= icon('calendar') ?> Hours &amp; closed days</a>
     <a class="btn btn--orange btn--sm" href="/admin/messages"><?= icon('phone') ?> SMS outbox<?= $sms['failed'] ? ' (' . $sms['failed'] . ' failed)' : '' ?></a>
     <a class="btn btn--green btn--sm" href="/admin/export"><?= icon('download') ?> Export CSV</a>
     <button class="btn btn--ghost btn--sm" onclick="window.print()"><?= icon('print') ?> Print list</button>
@@ -128,7 +129,7 @@ $liveSms = $config['sms']['driver'] !== 'log';
                       New date
                       <input type="date" name="appointment_date" required
                              value="<?= e($b['appointment_date']) ?>"
-                             min="<?= e(first_bookable_date()) ?>" max="<?= e(last_bookable_date($config)) ?>">
+                             min="<?= e(first_bookable_date($config)) ?>" max="<?= e(last_bookable_date($config)) ?>">
                     </label>
 
                     <label>

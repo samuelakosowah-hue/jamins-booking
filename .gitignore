@@ -7,6 +7,7 @@ data/bookings.sqlite-journal
 data/bookings.sqlite-wal
 data/bookings.sqlite-shm
 data/sessions/
+data/backups/
 data/php-error.log
 
 # OS / editor noise
